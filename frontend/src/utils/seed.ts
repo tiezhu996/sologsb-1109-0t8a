@@ -1,6 +1,6 @@
 import { db } from './db';
 import { HERB_ORIGINS, type HerbMaterial } from '../types/herb-material';
-import { METHOD_NAMES, type ProcessingMethod } from '../types/processing-method';
+import { METHOD_NAMES, snapshotOf, type ProcessingMethod } from '../types/processing-method';
 import type { ProcessBatch } from '../types/process-batch';
 import { CABINETS, type RetainSample } from '../types/retain-sample';
 import { judgeDegree, expectedYieldOf } from './degree';
@@ -30,9 +30,17 @@ export const SEED_METHODS: ProcessingMethod[] = [
   { id: 'method-008', name: '煮', auxiliary: '米醋', auxRatio: 20, fireLevel: '中火', tempRange: [95, 100], duration: 60, criterion: '无白心、断面角质样、有醋香', criterionDimension: '断面', applicable: '延胡索、乌头' },
   { id: 'method-009', name: '燀', auxiliary: '无', auxRatio: 0, fireLevel: '武火', tempRange: [95, 100], duration: 5, criterion: '种皮易脱落、仁无白心', criterionDimension: '断面', applicable: '苦杏仁、桃仁' },
   { id: 'method-010', name: '煅', auxiliary: '无', auxRatio: 0, fireLevel: '武火', tempRange: [300, 500], duration: 45, criterion: '质酥脆、无光泽、断面灰白', criterionDimension: '断面', applicable: '牡蛎、龙骨' },
-  { id: 'method-011', name: '麸炒', auxiliary: '麦麸', auxRatio: 12, fireLevel: '文火', tempRange: [120, 150], duration: 9, criterion: '色黄、麸香明显、无焦斑', criterionDimension: '色泽', applicable: '苍术（派生）', derivedFrom: 'method-002' },
-  { id: 'method-012', name: '酒炙', auxiliary: '黄酒', auxRatio: 15, fireLevel: '文火', tempRange: [100, 130], duration: 18, criterion: '酒气尽、断面棕褐、色泽均匀', criterionDimension: '断面', applicable: '川芎（派生）', derivedFrom: 'method-003' },
 ];
+
+(() => {
+  const branStir = SEED_METHODS.find((m) => m.id === 'method-002')!;
+  const wineRoast = SEED_METHODS.find((m) => m.id === 'method-003')!;
+  // 派生方法记录来源参数快照；若来源关键参数后续调整，列表会标「基础方法已改·待复核」
+  SEED_METHODS.push(
+    { id: 'method-011', name: '麸炒', auxiliary: '麦麸', auxRatio: 12, fireLevel: '文火', tempRange: [120, 150], duration: 9, criterion: '色黄、麸香明显、无焦斑', criterionDimension: '色泽', applicable: '苍术（派生）', derivedFrom: 'method-002', baseSnapshot: snapshotOf(branStir) },
+    { id: 'method-012', name: '酒炙', auxiliary: '黄酒', auxRatio: 15, fireLevel: '文火', tempRange: [100, 130], duration: 18, criterion: '酒气尽、断面棕褐、色泽均匀', criterionDimension: '断面', applicable: '川芎（派生）', derivedFrom: 'method-003', baseSnapshot: snapshotOf(wineRoast) },
+  );
+})();
 
 function isoMinutesAgo(minutes: number): string {
   return new Date(Date.now() - minutes * 60_000).toISOString();

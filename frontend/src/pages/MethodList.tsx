@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { App as AntApp, Button, Card, Col, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography } from 'antd';
+import { App as AntApp, Button, Card, Col, Form, Input, InputNumber, Modal, Row, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import FireLevelTag from '../components/common/FireLevelTag';
 import RatioCalculator from '../components/common/RatioCalculator';
@@ -9,6 +9,8 @@ import {
   CRITERION_DIMENSIONS,
   FIRE_LEVELS,
   METHOD_NAMES,
+  baseDiffLines,
+  isBaseChanged,
   type Auxiliary,
   type CriterionDimension,
   type FireLevel,
@@ -33,12 +35,13 @@ interface MethodFormValues {
 
 /** 炮制方法与辅料比例：按投料量折算用量并可复制派生 */
 export default function MethodList() {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const methods = useMethodStore((s) => s.methods);
   const addMethod = useMethodStore((s) => s.addMethod);
   const updateMethod = useMethodStore((s) => s.updateMethod);
   const removeMethod = useMethodStore((s) => s.removeMethod);
   const deriveMethod = useMethodStore((s) => s.deriveMethod);
+  const reviewDerived = useMethodStore((s) => s.reviewDerived);
 
   const [form] = Form.useForm<MethodFormValues>();
   const [open, setOpen] = useState(false);
@@ -47,6 +50,15 @@ export default function MethodList() {
   const [deriveOpen, setDeriveOpen] = useState(false);
   const [deriveSource, setDeriveSource] = useState<ProcessingMethod | null>(null);
   const [deriveForm] = Form.useForm<{ name: MethodName; auxRatio: number }>();
+
+  const [reviewTarget, setReviewTarget] = useState<ProcessingMethod | null>(null);
+  const [deleteBlock, setDeleteBlock] = useState<{ base: ProcessingMethod; dependents: ProcessingMethod[] } | null>(null);
+
+  const methodById = useMemo(() => new Map(methods.map((m) => [m.id, m])), [methods]);
+  /** 某方法派生出的全部方法（删除前需先处理） */
+  const dependentsOf = (id: string) => methods.filter((m) => m.derivedFrom === id);
+  /** 派生方法的来源方法（可能已被删，历史数据兜底） */
+  const baseOf = (record: ProcessingMethod) => (record.derivedFrom ? methodById.get(record.derivedFrom) : undefined);
 
   const [calcMethodId, setCalcMethodId] = useState<string>(methods[0]?.id ?? '');
   const [calcFeedKg, setCalcFeedKg] = useState<number>(100);
@@ -127,17 +139,75 @@ export default function MethodList() {
     setDeriveOpen(false);
   };
 
+  const submitReview = async () => {
+    if (!reviewTarget) return;
+    await reviewDerived(reviewTarget.id);
+    message.success(`已复核「${reviewTarget.name}」，待复核标记已撤掉`);
+    setReviewTarget(null);
+  };
+
+  /** 删除前检查：仍有派生方法引用时先列出这些派生方法并拦住 */
+  const handleDelete = (record: ProcessingMethod) => {
+    const dependents = dependentsOf(record.id);
+    if (dependents.length > 0) {
+      setDeleteBlock({ base: record, dependents });
+      return;
+    }
+    modal.confirm({
+      title: `确认删除方法「${record.name}」？`,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        const blocked = await removeMethod(record.id);
+        if (blocked.length > 0) {
+          setDeleteBlock({ base: record, dependents: blocked });
+          return;
+        }
+        message.success('已删除');
+      },
+    });
+  };
+
+  const reviewBase = reviewTarget ? baseOf(reviewTarget) : undefined;
+  const reviewDiffs = reviewTarget && reviewBase ? baseDiffLines(reviewTarget, reviewBase) : [];
+
   const columns: TableColumnsType<ProcessingMethod> = [
     {
       title: '方法',
       dataIndex: 'name',
-      width: 90,
-      render: (v: string, record) => (
-        <Space size={4}>
-          <Text strong>{v}</Text>
-          {record.derivedFrom ? <Tag color="blue">派生</Tag> : null}
-        </Space>
-      ),
+      width: 230,
+      render: (v: string, record) => {
+        const base = baseOf(record);
+        const stale = isBaseChanged(record, base);
+        return (
+          <Space size={4} wrap>
+            <Text strong>{v}</Text>
+            {record.derivedFrom ? (
+              base ? (
+                <Tag color="blue">派生自「{base.name} · {base.applicable}」</Tag>
+              ) : (
+                <Tag>派生 · 来源已删除</Tag>
+              )
+            ) : null}
+            {stale && base ? (
+              <Tooltip
+                title={
+                  <div>
+                    <div>基础方法「{base.name}」自派生以来调整了：</div>
+                    {baseDiffLines(record, base).map((line) => (
+                      <div key={line}>· {line}</div>
+                    ))}
+                    <div>请复核本方法参数后点「复核」撤掉标记</div>
+                  </div>
+                }
+              >
+                <Tag color="orange">基础方法已改 · 待复核</Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
+        );
+      },
     },
     { title: '辅料', dataIndex: 'auxiliary', width: 80 },
     { title: '每100kg用量(kg)', dataIndex: 'auxRatio', width: 140, align: 'right' },
@@ -151,26 +221,32 @@ export default function MethodList() {
     { title: '适用药材', dataIndex: 'applicable', width: 160, ellipsis: true },
     {
       title: '操作',
-      width: 200,
+      width: 240,
       fixed: 'right',
-      render: (_, record) => (
-        <Space size={4}>
-          <Button size="small" type="link" onClick={() => { setCalcMethodId(record.id); setCalcAuxUsedKg(Number(((calcFeedKg * record.auxRatio) / 100).toFixed(2))); }}>
-            折算
-          </Button>
-          <Button size="small" type="link" onClick={() => openDerive(record)}>
-            复制派生
-          </Button>
-          <Button size="small" type="link" onClick={() => openEdit(record)}>
-            编辑
-          </Button>
-          <Popconfirm title={`确认删除方法「${record.name}」？`} onConfirm={() => removeMethod(record.id).then(() => message.success('已删除'))}>
-            <Button size="small" type="link" danger>
+      render: (_, record) => {
+        const stale = isBaseChanged(record, baseOf(record));
+        return (
+          <Space size={4}>
+            <Button size="small" type="link" onClick={() => { setCalcMethodId(record.id); setCalcAuxUsedKg(Number(((calcFeedKg * record.auxRatio) / 100).toFixed(2))); }}>
+              折算
+            </Button>
+            <Button size="small" type="link" onClick={() => openDerive(record)}>
+              复制派生
+            </Button>
+            {stale ? (
+              <Button size="small" type="link" onClick={() => setReviewTarget(record)}>
+                复核
+              </Button>
+            ) : null}
+            <Button size="small" type="link" onClick={() => openEdit(record)}>
+              编辑
+            </Button>
+            <Button size="small" type="link" danger onClick={() => handleDelete(record)}>
               删除
             </Button>
-          </Popconfirm>
-        </Space>
-      ),
+          </Space>
+        );
+      },
     },
   ];
 
@@ -179,7 +255,7 @@ export default function MethodList() {
       <Title level={3} style={{ marginBottom: 4 }}>
         炮制方法与辅料比例
       </Title>
-      <Paragraph type="secondary">选择方法即带出辅料比例、火候与判断标准；支持按投料量折算辅料用量与反向推算。</Paragraph>
+      <Paragraph type="secondary">选择方法即带出辅料比例、火候与判断标准；支持按投料量折算辅料用量与反向推算。派生方法标注来源基础方法，基础方法变动后派生方法会提示「待复核」。</Paragraph>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={24} lg={14}>
@@ -317,8 +393,48 @@ export default function MethodList() {
           <Form.Item name="auxRatio" label="辅料比例(每100kg用量 kg)" rules={[{ required: true, message: '请输入辅料比例' }]}>
             <InputNumber min={0} step={0.5} style={{ width: '100%' }} />
           </Form.Item>
-          <Text type="secondary">派生会复制火候、温度区间与判断标准，仅辅料比例可按需调整。</Text>
+          <Text type="secondary">派生会复制火候、温度区间与判断标准，仅辅料比例可按需调整；基础方法后续变动时，派生方法会提示「待复核」。</Text>
         </Form>
+      </Modal>
+
+      <Modal open={reviewTarget !== null} title={`复核派生方法 · ${reviewTarget?.name ?? ''}`} onCancel={() => setReviewTarget(null)} onOk={submitReview} okText="确认复核" cancelText="取消">
+        {reviewTarget && reviewBase ? (
+          <div>
+            <Paragraph>基础方法「{reviewBase.name}」自派生以来调整了以下关键参数：</Paragraph>
+            <ul style={{ paddingLeft: 20 }}>
+              {reviewDiffs.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              请对照最新基础方法检查本方法的温度区间、时长、判断标准与辅料比例（可先用「编辑」修改）；确认无误后点「确认复核」，待复核标记随即撤掉。
+            </Paragraph>
+          </div>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={deleteBlock !== null}
+        title={`方法「${deleteBlock?.base.name ?? ''}」仍被派生方法引用，不能删除`}
+        onCancel={() => setDeleteBlock(null)}
+        footer={
+          <Button type="primary" onClick={() => setDeleteBlock(null)}>
+            知道了
+          </Button>
+        }
+      >
+        {deleteBlock ? (
+          <div>
+            <Paragraph>以下 {deleteBlock.dependents.length} 个派生方法还在引用该方法，请先删除或调整这些派生方法，再删除基础方法：</Paragraph>
+            <ul style={{ paddingLeft: 20 }}>
+              {deleteBlock.dependents.map((d) => (
+                <li key={d.id}>
+                  {d.name} · {d.auxiliary !== '无' ? `${d.auxiliary} ${d.auxRatio}kg/100kg` : '无辅料'}（{d.applicable}）
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </Modal>
     </div>
   );

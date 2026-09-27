@@ -1,6 +1,6 @@
 import Dexie, { type Table } from 'dexie';
 import type { HerbMaterial } from '../types/herb-material';
-import type { ProcessingMethod } from '../types/processing-method';
+import { snapshotOf, type ProcessingMethod } from '../types/processing-method';
 import type { ProcessBatch } from '../types/process-batch';
 import type { RetainSample } from '../types/retain-sample';
 
@@ -8,7 +8,7 @@ import type { RetainSample } from '../types/retain-sample';
 export const DB_NAME = 'gbherbprocess-db';
 
 /** 当前 schema 版本，与 db.version(n) 对应 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 class HerbProcessDB extends Dexie {
   herbs!: Table<HerbMaterial, string>;
@@ -46,6 +46,32 @@ class HerbProcessDB extends Dexie {
           .modify((row: ProcessBatch) => {
             if (typeof row.locked !== 'boolean') {
               row.locked = false;
+            }
+          });
+      });
+
+    // v3：派生方法增加来源参数快照（baseSnapshot），用于识别「基础方法已改·待复核」。
+    // 历史派生方法以来源方法当前参数回填快照。
+    this.version(3)
+      .stores({
+        herbs: 'id, name, origin, part, batchNo, receivedAt',
+        methods: 'id, name, auxiliary, fireLevel',
+        batches: 'id, batchNo, herbId, methodId, degree, startedAt, locked',
+        samples: 'id, sampleNo, batchId, cabinet, retainedAt',
+        meta: 'key',
+      })
+      .upgrade(async (tx) => {
+        const methods = await tx.table<ProcessingMethod, string>('methods').toArray();
+        const byId = new Map(methods.map((m) => [m.id, m]));
+        await tx
+          .table<ProcessingMethod, string>('methods')
+          .toCollection()
+          .modify((row) => {
+            if (row.derivedFrom && !row.baseSnapshot) {
+              const base = byId.get(row.derivedFrom);
+              if (base) {
+                row.baseSnapshot = snapshotOf(base);
+              }
             }
           });
       });
