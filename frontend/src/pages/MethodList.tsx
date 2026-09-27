@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react';
-import { App as AntApp, Button, Card, Col, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Card, Col, Form, Input, InputNumber, Modal, Popconfirm, Row, Select, Space, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import FireLevelTag from '../components/common/FireLevelTag';
 import RatioCalculator from '../components/common/RatioCalculator';
 import { useMethodStore } from '../stores/methodStore';
+import { derivationStatus, findDerivedUsers, formatTempRange } from '../utils/derive';
 import {
   AUXILIARIES,
   CRITERION_DIMENSIONS,
@@ -39,6 +40,7 @@ export default function MethodList() {
   const updateMethod = useMethodStore((s) => s.updateMethod);
   const removeMethod = useMethodStore((s) => s.removeMethod);
   const deriveMethod = useMethodStore((s) => s.deriveMethod);
+  const reviewDerived = useMethodStore((s) => s.reviewDerived);
 
   const [form] = Form.useForm<MethodFormValues>();
   const [open, setOpen] = useState(false);
@@ -47,6 +49,9 @@ export default function MethodList() {
   const [deriveOpen, setDeriveOpen] = useState(false);
   const [deriveSource, setDeriveSource] = useState<ProcessingMethod | null>(null);
   const [deriveForm] = Form.useForm<{ name: MethodName; auxRatio: number }>();
+
+  const [reviewTarget, setReviewTarget] = useState<ProcessingMethod | null>(null);
+  const [blockDelete, setBlockDelete] = useState<{ base: ProcessingMethod; users: ProcessingMethod[] } | null>(null);
 
   const [calcMethodId, setCalcMethodId] = useState<string>(methods[0]?.id ?? '');
   const [calcFeedKg, setCalcFeedKg] = useState<number>(100);
@@ -127,17 +132,70 @@ export default function MethodList() {
     setDeriveOpen(false);
   };
 
+  const reviewBase = reviewTarget?.derivedFrom ? methods.find((m) => m.id === reviewTarget.derivedFrom) : undefined;
+  const reviewStatus = reviewTarget ? derivationStatus(reviewTarget, methods) : null;
+
+  const submitReview = async () => {
+    if (!reviewTarget) return;
+    await reviewDerived(reviewTarget.id);
+    message.success('已复核，待复核标记已撤掉');
+    setReviewTarget(null);
+  };
+
+  /** 基础方法仍有派生方法在用：列出派生方法并拦住不删 */
+  const renderDeleteButton = (record: ProcessingMethod) => {
+    const users = findDerivedUsers(methods, record.id);
+    if (users.length > 0) {
+      return (
+        <Button size="small" type="link" danger onClick={() => setBlockDelete({ base: record, users })}>
+          删除
+        </Button>
+      );
+    }
+    return (
+      <Popconfirm title={`确认删除方法「${record.name}」？`} onConfirm={() => removeMethod(record.id).then(() => message.success('已删除'))}>
+        <Button size="small" type="link" danger>
+          删除
+        </Button>
+      </Popconfirm>
+    );
+  };
+
   const columns: TableColumnsType<ProcessingMethod> = [
     {
       title: '方法',
       dataIndex: 'name',
-      width: 90,
-      render: (v: string, record) => (
-        <Space size={4}>
-          <Text strong>{v}</Text>
-          {record.derivedFrom ? <Tag color="blue">派生</Tag> : null}
-        </Space>
-      ),
+      width: 180,
+      render: (v: string, record) => {
+        const status = derivationStatus(record, methods);
+        const base = record.derivedFrom ? methods.find((m) => m.id === record.derivedFrom) : undefined;
+        return (
+          <div>
+            <Space size={4}>
+              <Text strong>{v}</Text>
+              {record.derivedFrom ? <Tag color="blue">派生</Tag> : null}
+            </Space>
+            {record.derivedFrom ? (
+              <div style={{ fontSize: 12, color: '#8c9a90' }}>
+                派生自「{base ? `${base.name}·${base.auxiliary}` : '已删除的基础方法'}」
+              </div>
+            ) : null}
+            {status.kind === 'pending' ? (
+              <div style={{ marginTop: 2 }}>
+                <Tag color="orange">基础方法已改·待复核</Tag>
+                <Button size="small" type="link" style={{ padding: 0 }} onClick={() => setReviewTarget(record)}>
+                  复核
+                </Button>
+              </div>
+            ) : null}
+            {status.kind === 'missing' ? (
+              <div style={{ marginTop: 2 }}>
+                <Tag color="red">基础方法已删除</Tag>
+              </div>
+            ) : null}
+          </div>
+        );
+      },
     },
     { title: '辅料', dataIndex: 'auxiliary', width: 80 },
     { title: '每100kg用量(kg)', dataIndex: 'auxRatio', width: 140, align: 'right' },
@@ -164,11 +222,7 @@ export default function MethodList() {
           <Button size="small" type="link" onClick={() => openEdit(record)}>
             编辑
           </Button>
-          <Popconfirm title={`确认删除方法「${record.name}」？`} onConfirm={() => removeMethod(record.id).then(() => message.success('已删除'))}>
-            <Button size="small" type="link" danger>
-              删除
-            </Button>
-          </Popconfirm>
+          {renderDeleteButton(record)}
         </Space>
       ),
     },
@@ -317,8 +371,84 @@ export default function MethodList() {
           <Form.Item name="auxRatio" label="辅料比例(每100kg用量 kg)" rules={[{ required: true, message: '请输入辅料比例' }]}>
             <InputNumber min={0} step={0.5} style={{ width: '100%' }} />
           </Form.Item>
-          <Text type="secondary">派生会复制火候、温度区间与判断标准，仅辅料比例可按需调整。</Text>
+          <Text type="secondary">派生会复制火候、温度区间与判断标准，仅辅料比例可按需调整；同时记录基础方法当前标准作为复核基准。</Text>
         </Form>
+      </Modal>
+
+      <Modal
+        open={!!reviewTarget}
+        title={`复核派生方法 · ${reviewTarget?.name ?? ''}`}
+        onCancel={() => setReviewTarget(null)}
+        onOk={submitReview}
+        okText="复核通过"
+        cancelText="取消"
+        okButtonProps={{ disabled: !reviewBase }}
+        width={560}
+      >
+        {reviewTarget && reviewBase ? (
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            {reviewStatus?.kind === 'pending' && reviewStatus.hasBaseline ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="基础方法较派生（或上次复核）时有变动"
+                description={
+                  <ul style={{ margin: 0, paddingInlineStart: 18 }}>
+                    {reviewStatus.diffs.map((d) => (
+                      <li key={d.key}>
+                        {d.label}：派生时 {d.baselineValue} → 现 {d.baseValue}
+                      </li>
+                    ))}
+                  </ul>
+                }
+              />
+            ) : null}
+            {reviewStatus?.kind === 'pending' && !reviewStatus.hasBaseline ? (
+              <Alert type="warning" showIcon message="该派生方法未记录派生基准（旧数据），请对照基础方法现行标准复核，复核后将记录当前基准" />
+            ) : null}
+            <Table
+              rowKey="label"
+              size="small"
+              pagination={false}
+              columns={[
+                { title: '项目', dataIndex: 'label', width: 90 },
+                { title: `基础方法（${reviewBase.name}·${reviewBase.auxiliary}）`, dataIndex: 'base' },
+                { title: '本派生方法', dataIndex: 'mine' },
+              ]}
+              dataSource={[
+                { label: '辅料比例', base: `${reviewBase.auxRatio}kg/100kg`, mine: `${reviewTarget.auxRatio}kg/100kg` },
+                { label: '温度区间', base: formatTempRange(reviewBase.tempRange), mine: formatTempRange(reviewTarget.tempRange) },
+                { label: '时长', base: `${reviewBase.duration}min`, mine: `${reviewTarget.duration}min` },
+                { label: '判断标准', base: reviewBase.criterion, mine: reviewTarget.criterion },
+              ]}
+            />
+            <Text type="secondary">复核只撤掉待复核标记，不会改动本派生方法；如需跟随基础方法调整，请复核后用「编辑」修改。</Text>
+          </Space>
+        ) : (
+          <Text type="secondary">基础方法已不存在，无法复核。</Text>
+        )}
+      </Modal>
+
+      <Modal
+        open={!!blockDelete}
+        title="无法删除基础方法"
+        footer={
+          <Button type="primary" onClick={() => setBlockDelete(null)}>
+            知道了
+          </Button>
+        }
+        onCancel={() => setBlockDelete(null)}
+      >
+        <Paragraph>
+          「{blockDelete?.base.name}」仍被 {blockDelete?.users.length ?? 0} 个派生方法引用，请先删除这些派生方法：
+        </Paragraph>
+        <ul style={{ margin: 0, paddingInlineStart: 18 }}>
+          {blockDelete?.users.map((u) => (
+            <li key={u.id}>
+              {u.name} · {u.auxiliary}（适用：{u.applicable}）
+            </li>
+          ))}
+        </ul>
       </Modal>
     </div>
   );
